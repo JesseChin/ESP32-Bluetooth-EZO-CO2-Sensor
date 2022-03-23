@@ -15,23 +15,20 @@
 #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
 #endif
 
-#define SENSOR_POLLING_PERIOD 10
+#define SENSOR_POLLING_PERIOD 7
 #define BLUETOOTH_POLLING_PERIOD 20
+#define SERIAL_MESSAGE_PERIOD 1000 // in ms
 #define co2Addr0 0x68
 #define co2Addr1 0x6A
 #define relay 15
 
 static BluetoothSerial SerialBT;
 
-
 static Ezo_board CO2 = Ezo_board(105, "CO2");
 static int atlasVal = 0;
-// static const int co2Addr0 = 0x68;
 static int co2Value0 = 0;
-// static const int co2Addr1 = 0x6A;
 static int co2Value1 = 0;
 
-// static int relay = 15;
 
 // Globals
 static int wAvg = 0;
@@ -85,95 +82,25 @@ Sequencer2 Seq(&step1, 1000, &step2, 0);
 
 void step1() {
   CO2.send_read_cmd();
-  co2Value0 = readCO2(co2Addr0);
-  co2Value1 = readCO2(co2Addr1);
+  int temp_co2Value0 = readCO2(co2Addr0);
+  if (temp_co2Value0 != 0)
+    co2Value0 = readCO2(co2Addr0);
+  int temp_co2Value1 = readCO2(co2Addr1);
+  if (temp_co2Value1 != 0)
+    co2Value1 = readCO2(co2Addr1);
 }
-
-static bool DataGone = false;
-static int iter = 0;
 
 void step2() {
   CO2.receive_read_cmd();
-  // select all in bool statement to update datagone value
-  bool atG = false;
-  bool atK0 = false;
-  bool atK1 = false;
   if ((CO2.get_error() == Ezo_board::SUCCESS) &&
       (CO2.get_last_received_reading() > -1000.0)) {
-    atlasVal = CO2.get_last_received_reading();
-    atG = true;
-  } else {
-    atlasVal = 0;
-    iter++;
-    if (!DataGone) {
-      DataGone = true;
-    } else {
-      if (iter >= 100) {
-        Serial.println("Data Loss... ERROR ERROR");
-      }
-    }
+    int temp_atlasVal = CO2.get_last_received_reading();
+    if (temp_atlasVal != 0)
+      atlasVal = temp_atlasVal;
   }
-  if (co2Value0 > 0) {
-    atK0 = true;
-  } else {
-    iter++;
-    if (!DataGone) {
-      DataGone = true;
-    } else {
-      if (iter >= 100) {
-        Serial.println("Data Loss... ERROR ERROR");
-      }
-    }
-  }
-  if (co2Value1 > 0) {
-    atK1 = true;
-  } else {
-    iter++;
-    if (!DataGone) {
-      DataGone = true;
-    } else {
-      if (iter >= 100) {
-        Serial.println("Data Loss... ERROR ERROR");
-      }
-    }
-  }
-
-  if (co2Value0 > 0 && co2Value1 > 0 && atlasVal > 0) {
-    Serial.println("********************************************");
-    Serial.print("A_CO2: ");
-    Serial.println(atlasVal);
-    Serial.print("K30_0: ");
-    Serial.println(co2Value0);
-    Serial.print("K30_1: ");
-    Serial.println(co2Value1);
-    DataGone = false;
-    iter = 0;
-
-    wAvg = round((0.6 * atlasVal) + (0.2 * co2Value0) + (0.2 * co2Value1));
-    Serial.print("Weighted average: ");
-    Serial.println(wAvg);
-
-    if (wAvg < 800) {
-      Serial.println("CO2 VALUE BELOW 800... Turning on regulator.");
-      digitalWrite(relay, HIGH);
-    } else {
-      Serial.println("CO2 VALUE ABOVE 800... Shutting down regulator.");
-      digitalWrite(relay, LOW);
-    }
-  }
-  //  else
-  //  {
-  //    Serial.println("********************************************");
-  //    if(atG)
-  //      Serial.println("A_CO2: Checksum failed / Communication failure");
-  //    if(atK0)
-  //      Serial.println("K30_0: Checksum failed / Communication failure");
-  //    if(atK1)
-  //      Serial.println("K30_1: Checksum failed / Communication failure");
-  //  }
 }
 void bluetoothTask(void *parameters) {
-  char data;
+  int data;
   for(;;) {
     if (SerialBT.available()) {
       data = SerialBT.read();
@@ -194,6 +121,42 @@ void sequenceTask(void *parameters) {
     Seq.run();
   }
 }
+void reportValues(void *parameters) {
+  for(;;) {
+// if (co2Value0 > 0 && co2Value1 > 0 && atlasVal > 0) {
+    Serial.println("********************************************");
+    Serial.print("A_CO2: ");
+    Serial.println(atlasVal);
+    Serial.print("K30_0: ");
+    Serial.println(co2Value0);
+    Serial.print("K30_1: ");
+    Serial.println(co2Value1);
+
+    wAvg = round((0.6 * atlasVal) + (0.2 * co2Value0) + (0.2 * co2Value1));
+    Serial.print("Weighted average: ");
+    Serial.println(wAvg);
+
+    if (wAvg < 800) {
+      Serial.println("CO2 VALUE BELOW 800... Turning on regulator.");
+      digitalWrite(relay, HIGH);
+    } else {
+      Serial.println("CO2 VALUE ABOVE 800... Shutting down regulator.");
+      digitalWrite(relay, LOW);
+    }
+  // }
+  //  else
+  //  {
+  //    Serial.println("********************************************");
+  //    if(atG)
+  //      Serial.println("A_CO2: Checksum failed / Communication failure");
+  //    if(atK0)
+  //      Serial.println("K30_0: Checksum failed / Communication failure");
+  //    if(atK1)
+  //      Serial.println("K30_1: Checksum failed / Communication failure");
+  //  }
+  vTaskDelay(SERIAL_MESSAGE_PERIOD / portTICK_PERIOD_MS);
+  }
+}
 
 void setup() {
   Serial.begin(9600);
@@ -207,8 +170,9 @@ void setup() {
 
   TaskHandle_t xBluetooth = NULL;
   TaskHandle_t xSequence = NULL;
-  xTaskCreate(sequenceTask, "Sequence", 8192, NULL, 2, &xSequence);
+  xTaskCreate(sequenceTask, "Sequence", 8192, NULL, 4, &xSequence);
   xTaskCreate(bluetoothTask, "Bluetooth", 2048, NULL, 2, &xBluetooth);
+  xTaskCreate(reportValues, "Bluetooth", 2048, NULL, 2, &xBluetooth);
 
   vTaskDelete(NULL);
 }
